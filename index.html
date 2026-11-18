@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Massar Voice Entry</title>
+    <meta name="theme-color" content="#0f766e" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/icon.svg" />
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <header class="top">
+      <h1>إدخال النقط</h1>
+      <nav id="tabs" class="tabs"></nav>
+      <label class="btn ghost" title="إضافة ملفات Massar">
+        + ملفات
+        <input id="fileInput" type="file" accept=".xlsx" multiple hidden />
+      </label>
+    </header>
+
+    <main id="app">
+      <section id="drop" class="drop">
+        <p>اسحب ملفات Massar (‎.xlsx‎) هنا</p>
+        <p class="muted">أو استعمل زر «+ ملفات»</p>
+      </section>
+
+      <section id="workspace" hidden>
+        <div class="controls">
+        <div class="toolbar">
+          <div id="meta" class="meta"></div>
+          <div id="examPicker" class="seg"></div>
+          <div class="spacer"></div>
+          <button id="micBtn" class="btn mic" title="الاستماع (ar-MA)">🎤 استماع</button>
+          <button id="undoBtn" class="btn ghost" title="تراجع (Ctrl+Z)">↶ تراجع</button>
+          <button id="exportBtn" class="btn primary">⬇ تصدير الملف</button>
+        </div>
+
+        <div class="progress-row">
+          <div class="progress"><div id="progressBar"></div></div>
+          <span id="progressText" class="mono"></span>
+          <button id="missingToggle" class="btn ghost small"></button>
+        </div>
+        <div id="missing" class="missing" hidden></div>
+
+        <div id="voice" class="voice" hidden>
+          <div class="transcript"><span class="dotrec"></span><span id="lastHeard" class="last"></span><span id="interim" class="interim"></span></div>
+          <ol id="heardLog" class="heard-log"></ol>
+          <div class="voice-hint muted small">قل: «الاسم + النقطة» أو «رقم 5 خمسطاش» — الأرقام أدق من الأسماء<br>أوامر: واخا · لا · واحد/جوج/تلاتة (للاختيار) · رجع · شكون بقا · فرض تاني/تالت · الأنشطة · حبس · سجل</div>
+        </div>
+
+        <form id="entry" class="entry" autocomplete="off">
+          <div class="search-wrap">
+            <input id="search" placeholder="الاسم أو رقم التلميذ… (مثال: منصوري 15 · #5 15 · رقم 5 15)" />
+            <ol id="candidates" class="candidates" hidden></ol>
+          </div>
+          <input id="score" class="score-input" placeholder="15.5 / خمسطاش ونص" />
+          <button class="btn primary" type="submit">تسجيل ↵</button>
+          <div id="preview" class="preview"></div>
+          <div id="pick" class="pick" hidden></div>
+          <div id="pending" class="pending" hidden></div>
+          <div id="teach" class="pending confirm" hidden></div>
+        </form>
+        </div>
+
+        <div class="table-wrap">
+          <table id="table">
+            <thead></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <dialog id="confirm">
+      <form method="dialog">
+        <p id="confirmText"></p>
+        <div class="dialog-actions">
+          <button value="ok" class="btn primary" autofocus>تأكيد</button>
+          <button value="cancel" class="btn ghost">إلغاء</button>
+        </div>
+      </form>
+    </dialog>
+
+    <div id="toast" class="toast" hidden></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

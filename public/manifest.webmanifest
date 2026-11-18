@@ -1,0 +1,13 @@
+{
+  "name": "Massar Voice Entry",
+  "short_name": "Massar Voice",
+  "description": "إدخال نقط المراقبة المستمرة بالصوت في ملفات مسار",
+  "lang": "ar",
+  "dir": "rtl",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f6f7f9",
+  "theme_color": "#0f766e",
+  "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }]
+}
