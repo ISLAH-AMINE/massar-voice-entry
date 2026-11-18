@@ -12,8 +12,8 @@ import type { NameIndex, Named } from '../match/names';
 import { parseStudentRef } from '../match/studentRef';
 
 export type Interpretation<T extends Named> =
-  | { kind: 'entry'; student: T; ex: Extracted; heard: string }
-  | { kind: 'student'; student: T; heard: string }
+  | { kind: 'entry'; student: T; ex: Extracted; heard: string; matchScore: number }
+  | { kind: 'student'; student: T; heard: string; matchScore: number }
   | { kind: 'scoreOnly'; score: ParseResult; ex: Extracted; heard: string }
   | { kind: 'pick'; options: T[]; more: number; ex: Extracted | null; heard: string; nameText: string }
   | { kind: 'unknown'; heard: string; reason: string; nameText?: string; ex?: Extracted | null };
@@ -48,7 +48,7 @@ export function interpretOne<T extends Named>(heard: string, index: NameIndex<T>
   if (ref) {
     const student = index.at(ref.n);
     if (!student) return { kind: 'unknown', heard, reason: `لا يوجد تلميذ رقم ${ref.n}` };
-    return ref.ex ? { kind: 'entry', student, ex: ref.ex, heard } : { kind: 'student', student, heard };
+    return ref.ex ? { kind: 'entry', student, ex: ref.ex, heard, matchScore: 1 } : { kind: 'student', student, heard, matchScore: 1 };
   }
 
   const ex = extractTrailingScore(text);
@@ -59,7 +59,8 @@ export function interpretOne<T extends Named>(heard: string, index: NameIndex<T>
   if (m.status === 'none') return { kind: 'unknown', heard, reason: `لم أجد «${nameText}»`, nameText, ex };
   if (m.status === 'ambiguous') return { kind: 'pick', options: m.options.map((o) => o.student), more: m.more, ex, heard, nameText };
   const student = m.options[0].student;
-  return ex ? { kind: 'entry', student, ex, heard } : { kind: 'student', student, heard };
+  const matchScore = m.options[0].score;
+  return ex ? { kind: 'entry', student, ex, heard, matchScore } : { kind: 'student', student, heard, matchScore };
 }
 
 /**
@@ -85,3 +86,6 @@ export function interpret<T extends Named>(
   }
   return best;
 }
+
+/** Below this name-match score a voice entry asks «واخا؟» instead of writing (noise can look like a name). */
+export const SURE_MATCH = 0.8;

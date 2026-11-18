@@ -153,3 +153,23 @@ tr.opt td.idx { color: #b45309; font-weight: 700; }
 
 tr.live td { background: #ecfeff; }
 tr.live td.active-col { outline: 2px dashed #0891b2; outline-offset: -2px; }
+
+.btn.icon { padding: 7px 11px; font-size: 16px; }
+.btn.icon.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+.btn.mic { touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+
+/* ---- phones: big thumb-sized mic at the bottom, controls scroll away ---- */
+@media (max-width: 640px) {
+  main { padding: 10px 12px 96px; }
+  .top { padding: 8px 12px; gap: 8px; }
+  .controls { position: static; }
+  .voice-hint { display: none; }
+  .btn.mic {
+    position: fixed; inset-inline: 12px; bottom: 12px; z-index: 10;
+    padding: 18px; font-size: 20px; border-radius: 14px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, .18);
+  }
+  .btn.mic:not(.on) { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .toast { bottom: 92px; max-width: calc(100% - 24px); text-align: center; }
+  .seg button { padding: 6px 8px; font-size: 13px; }
+}

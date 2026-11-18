@@ -3,10 +3,12 @@ import { normalizeArabic } from './text/normalize';
 import { NameIndex, type MatchResult } from './match/names';
 import { parseScore, extractTrailingScore, type Extracted } from './score/darija';
 import { idbGet, idbSet } from './store';
-import { Recognizer } from './voice/recognizer';
-import { interpret, interpretOne } from './voice/interpret';
+import { Recognizer, type FinalResult } from './voice/recognizer';
+import { interpret, interpretOne, SURE_MATCH } from './voice/interpret';
+import { chatterReason, fractionOnly, Stabilizer } from './voice/noise';
+import { checkScore } from './score/validate';
 import { parseStudentRef } from './match/studentRef';
-import { matchCommand, COMMAND_WORDS, type Command } from './voice/commands';
+import { matchCommand, endsWithRestart, COMMAND_WORDS, type Command } from './voice/commands';
 
 // ---------- state ----------
 type Edits = Record<string, number | null>; // "G18" -> value (null = cleared)
@@ -41,6 +43,10 @@ const S = {
   pick: null as { options: Student[]; more: number; ex: Extracted | null; voice?: boolean; nameText?: string } | null,
   teach: null as { nameText: string; ex: Extracted | null } | null, // unknown spoken name waiting for a click // open disambiguation
   voiceTarget: null as Student | null, // named (or clicked) without a score: a bare spoken score goes here
+  voiceTargetScore: 1, // how sure that name match was
+  lastVoice: null as { classId: string; examCol: string; student: Student; value: number; at: number } | null, // for «ونص» corrections
+  lastHandled: null as { text: string; at: number } | null, // de-duplicates stable-partial vs final
+  ptt: readPref('ptt') === '1', // push-to-talk mode
   pending: null as Pending | null, // voice entry waiting for auto-commit / confirmation
   heard: [] as { text: string; outcome: string; cls: string }[], // recent utterances (newest first)
 };
@@ -68,6 +74,8 @@ const el = {
   pending: $('pending'),
   teach: $('teach'),
   micBtn: $<HTMLButtonElement>('micBtn'),
+  pttBtn: $<HTMLButtonElement>('pttBtn'),
+  restartBtn: $<HTMLButtonElement>('restartBtn'),
   voice: $('voice'),
   interim: $('interim'),
   lastHeard: $('lastHeard'),
@@ -86,6 +94,22 @@ const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&l
 function current(c: ClassState, st: Student, col: string): number | null {
   const ref = col + st.row;
   return ref in c.edits ? c.edits[ref] : st.scores[col];
+}
+
+// ---------- per-device preferences (localStorage may be unavailable) ----------
+function readPref(key: string): string | null {
+  try {
+    return localStorage.getItem('massar-voice:' + key);
+  } catch {
+    return null;
+  }
+}
+function writePref(key: string, value: string) {
+  try {
+    localStorage.setItem('massar-voice:' + key, value);
+  } catch {
+    /* private mode */
+  }
 }
 
 // ---------- persistence ----------
@@ -209,12 +233,13 @@ interface Pending {
   student: Student;
   value: number;
   old: number | null;
-  needsConfirm: boolean; // always true: only overwrites of an existing score wait
+  needsConfirm: boolean; // only overwrites and unsure name matches wait
+  unsure: boolean; // the name was only a weak match (noise?) → «واخا؟»
   heard: string; // what was said, for the log
   timer?: number;
 }
 
-function startPending(st: Student, value: number) {
+function startPending(st: Student, value: number, unsure = false) {
   const c = active()!;
   flushPending();
   S.voiceTarget = null;
@@ -226,9 +251,10 @@ function startPending(st: Student, value: number) {
     toast(`${st.name}: نفس النقطة (${fmt(value)})`);
     return;
   }
-  S.pending = { classId: c.id, examCol: S.examCol, student: st, value, old, needsConfirm: old !== null, heard: el.lastHeard.textContent || '' };
-  if (old === null) commitPending(); // empty cell → write right away (undo with ↶ / Ctrl+Z)
-  else renderPending(); // existing score → ask first
+  const needsConfirm = old !== null || unsure;
+  S.pending = { classId: c.id, examCol: S.examCol, student: st, value, old, needsConfirm, unsure, heard: el.lastHeard.textContent || '' };
+  if (!needsConfirm) commitPending(); // empty cell + sure name → write right away (undo with ↶ / Ctrl+Z)
+  else renderPending(); // existing score or doubtful name → ask first
 }
 
 async function commitPending() {
@@ -243,7 +269,10 @@ async function commitPending() {
     S.examCol = p.examCol;
     render();
   }
-  if (await commit(p.student, p.value, true)) logHeard(`${p.student.name} → ${fmt(p.value)}`, 'ok', p.heard);
+  if (await commit(p.student, p.value, true)) {
+    logHeard(`${p.student.name} → ${fmt(p.value)}`, 'ok', p.heard);
+    S.lastVoice = { classId: p.classId, examCol: p.examCol, student: p.student, value: p.value, at: Date.now() };
+  }
 }
 
 function cancelPending(reason = 'أُلغي') {
@@ -273,16 +302,20 @@ function renderPending() {
   }
   el.pending.hidden = false;
   el.pending.className = 'pending confirm';
+  const question = p.unsure
+    ? `هل تقصد <b>${esc(p.student.name)}</b>؟ <span class="mono">${p.old !== null ? `${fmt(p.old)} ← ` : ''}<b>${fmt(p.value)}</b></span> <span class="muted">(قل واخا أو لا)</span>`
+    : `استبدال؟ <b>${esc(p.student.name)}</b> <span class="mono">${fmt(p.old)} ← <b>${fmt(p.value)}</b></span>`;
   el.pending.innerHTML =
-    `<span>استبدال؟ <b>${esc(p.student.name)}</b> <span class="mono">${fmt(p.old)} ← <b>${fmt(p.value)}</b></span></span>` +
+    `<span>${question}</span>` +
     `<button type="button" class="btn primary small" data-act="ok">تأكيد ↵</button>` +
     `<button type="button" class="btn ghost small" data-act="cancel">إلغاء Esc</button>`;
 }
 
-/** Student (and maybe score) resolved from speech. */
-function applyVoiceEntry(st: Student, ex: Extracted | null) {
+/** Student (and maybe score) resolved from speech. `matchScore` < SURE_MATCH → ask before writing. */
+function applyVoiceEntry(st: Student, ex: Extracted | null, matchScore = 1) {
   if (!ex) {
     S.voiceTarget = st;
+    S.voiceTargetScore = matchScore;
     selectStudent(st, false);
     el.search.value = '';
     logHeard(`${st.name} — قل النقطة`, 'muted');
@@ -295,22 +328,45 @@ function applyVoiceEntry(st: Student, ex: Extracted | null) {
     toast(`${st.name}: ${ex.score.error}`, true);
     return;
   }
-  startPending(st, ex.score.value);
+  startPending(st, ex.score.value, matchScore < SURE_MATCH);
 }
 
-function handleUtterance(alternatives: string[]) {
+function handleUtterance(alternatives: string[], confidence = 0) {
   const c = active();
   if (!c) return;
   el.voice.hidden = false;
   el.interim.textContent = '';
   liveRow = null;
   el.tbody.querySelector('tr.live')?.classList.remove('live');
+  stabilizer.reset();
+  const first = alternatives[0] ?? '';
+  // the same phrase already handled from the stable partial text (see stabilizer)
+  if (S.lastHandled && Date.now() - S.lastHandled.at < 4000 && normalizeArabic(first) === S.lastHandled.text) return;
+  S.lastHandled = { text: normalizeArabic(first), at: Date.now() };
+
+  // «… عاود»: restart even when it ends a long phrase of background chatter
+  if (endsWithRestart(first)) {
+    el.lastHeard.textContent = first;
+    return restartListening('↻ من جديد');
+  }
   // A command only counts when it is the WHOLE utterance (first reading),
   // or when the first reading means nothing else and another reading is a command.
   const cmd0 = matchCommand(alternatives[0] ?? '', { pickOpen: !!S.pick });
   if (cmd0) {
     el.lastHeard.textContent = alternatives[0];
     return runCommand(cmd0);
+  }
+  // «ونص» / «و ربع» / «لا ربع» alone right after an entry: Chrome cut it off → fix the last score
+  const delta = fractionOnly(first);
+  if (delta !== null && S.lastVoice && Date.now() - S.lastVoice.at < 6000) {
+    el.lastHeard.textContent = first;
+    return void correctLastVoice(delta);
+  }
+  // background chatter: long sentences / very low confidence → ignore quietly
+  const noise = chatterReason(first, confidence);
+  if (noise) {
+    el.lastHeard.textContent = first;
+    return logHeard(noise, 'muted');
   }
   const r = interpret(alternatives, nameIndex(c), { awaitingScore: !!S.voiceTarget });
   if (r.kind === 'unknown') {
@@ -329,10 +385,10 @@ function handleUtterance(alternatives: string[]) {
 
   switch (r.kind) {
     case 'entry':
-      return applyVoiceEntry(r.student, r.ex);
+      return applyVoiceEntry(r.student, r.ex, r.matchScore);
     case 'student':
       flushPending();
-      return applyVoiceEntry(r.student, null);
+      return applyVoiceEntry(r.student, null, r.matchScore);
     case 'scoreOnly': {
       // "خمسطاش" right after a name, or to answer an open picker later
       const st = S.voiceTarget;
@@ -340,17 +396,51 @@ function handleUtterance(alternatives: string[]) {
         logHeard(`لمن هذه النقطة؟`, 'err');
         return toast('قل اسم التلميذ', true);
       }
-      return applyVoiceEntry(st, r.ex);
+      return applyVoiceEntry(st, r.ex, S.voiceTargetScore);
     }
     case 'pick':
       flushPending();
       openPick(r.options, r.more, r.ex, true, r.nameText);
       return logHeard(`أسماء متقاربة — اختر`, 'warn');
     case 'unknown':
-      logHeard(r.reason, 'err');
-      if (r.nameText) return openTeach(r.nameText, r.ex ?? null);
-      return toast(r.reason, true);
+      // only something that looked like an entry (it had a score) asks to be taught;
+      // other unknown words are usually people talking nearby → just log them
+      if (r.nameText && r.ex) {
+        logHeard(r.reason, 'err');
+        return openTeach(r.nameText, r.ex);
+      }
+      return logHeard(r.reason, 'muted');
   }
+}
+
+/** «ونص» after «… خمسطاش»: add the fraction to the entry just written by voice. */
+async function correctLastVoice(delta: number) {
+  const lv = S.lastVoice!;
+  const value = lv.value + delta;
+  const check = checkScore(value);
+  if (!check.ok) return logHeard(check.error, 'err');
+  if (S.activeId !== lv.classId || S.examCol !== lv.examCol) {
+    S.activeId = lv.classId;
+    S.examCol = lv.examCol;
+    render();
+  }
+  if (await commit(lv.student, value, true)) {
+    S.lastVoice = { ...lv, value, at: Date.now() };
+    logHeard(`${lv.student.name} → ${fmt(value)} (تصحيح)`, 'ok');
+  }
+}
+
+/** «عاود», ↻, or the watchdog: drop the current phrase and listen afresh. */
+function restartListening(msg: string) {
+  stabilizer.reset();
+  if (S.pending) cancelPending('عاود');
+  closePick();
+  closeTeach();
+  el.interim.textContent = '';
+  logHeard(msg, 'muted');
+  if (!recognizer) return toggleMic();
+  if (S.ptt) return; // push-to-talk: nothing is running between presses
+  recognizer.restart();
 }
 
 /** On load: a student whose name contains a command word («رجع», «لا» …) can't be called by that word alone. */
@@ -420,6 +510,8 @@ function runCommand(cmd: Command) {
     case 'export':
       logHeard('⬇ تصدير', 'ok');
       return void exportActive();
+    case 'restart':
+      return restartListening('↻ من جديد');
   }
 }
 
@@ -448,29 +540,93 @@ function logHeard(outcome: string, cls: string, text = el.lastHeard.textContent 
     .join('');
 }
 
+// ---------- noisy places: commit a stable partial phrase, restart on «… عاود» ----------
+/** A partial phrase that is already a sure, complete entry («name/رقم + valid score»). */
+function isCompleteEntry(text: string): boolean {
+  const c = active();
+  if (!c || chatterReason(text, 0)) return false;
+  const r = interpretOne(text, nameIndex(c));
+  return r.kind === 'entry' && r.ex.score.ok && r.matchScore >= SURE_MATCH;
+}
+const stabilizer = new Stabilizer(isCompleteEntry, 1000);
+let restartTailTimer: number | undefined;
+setInterval(() => {
+  if (!recognizer?.listening) return;
+  const text = stabilizer.check(Date.now());
+  if (!text) return;
+  // Chrome hasn't heard a pause (noise) but the phrase is clearly done: use it now,
+  // and drop the rest of this phrase so it isn't entered twice.
+  recognizer.restart();
+  handleUtterance([text]);
+}, 200);
+
+function onInterim(t: string) {
+  el.interim.textContent = t;
+  liveHighlight(t);
+  stabilizer.feed(t, Date.now());
+  // stuck on chatter: «… عاود» at the end of the partial text restarts (the final may never come)
+  clearTimeout(restartTailTimer);
+  if (endsWithRestart(t)) restartTailTimer = window.setTimeout(() => restartListening('↻ من جديد'), 600);
+}
+
 let recognizer: Recognizer | null = null;
+function ensureRecognizer(): Recognizer | null {
+  if (!Recognizer.supported()) {
+    toast('التعرف على الصوت غير متوفر — استعمل Chrome أو Edge', true);
+    return null;
+  }
+  if (recognizer) return recognizer;
+  recognizer = new Recognizer('ar-MA');
+  recognizer.onInterim = onInterim;
+  recognizer.onFinal = (res: FinalResult) => handleUtterance(res.alternatives, res.confidence);
+  recognizer.onStuck = () => logHeard('↻ أعدت الاستماع (ضجيج)', 'muted', el.interim.textContent || '');
+  recognizer.onState = (state, msg) => {
+    renderMic(state === 'listening' || (state === 'error' && recognizer!.listening));
+    if (msg) toast(msg, true);
+  };
+  return recognizer;
+}
+
+function renderMic(on = !!recognizer?.listening) {
+  el.micBtn.classList.toggle('on', on);
+  el.micBtn.textContent = S.ptt ? (on ? '● أتكلم…' : '✋ اضغط وتكلم') : on ? '■ إيقاف' : '🎤 استماع';
+  el.micBtn.title = S.ptt ? 'اضغط مطولاً وتكلم (أو اضغط على المسافة)' : 'الاستماع المستمر (ar-MA)';
+  el.pttBtn.classList.toggle('active', S.ptt);
+  el.pttBtn.title = S.ptt ? 'وضع الضغط للتحدث مفعّل — انقر للعودة إلى الاستماع المستمر' : 'وضع الضغط للتحدث (للأماكن الصاخبة)';
+  el.voice.hidden = !on && !S.heard.length && !S.ptt;
+}
+
 function toggleMic() {
-  if (!Recognizer.supported()) return toast('التعرف على الصوت غير متوفر — استعمل Chrome أو Edge', true);
-  if (!recognizer) {
-    recognizer = new Recognizer('ar-MA');
-    recognizer.onInterim = (t) => {
-      el.interim.textContent = t;
-      liveHighlight(t);
-    };
-    recognizer.onFinal = handleUtterance;
-    recognizer.onState = (state, msg) => {
-      el.micBtn.classList.toggle('on', state === 'listening' || (state === 'error' && recognizer!.listening));
-      el.micBtn.textContent = recognizer!.listening ? '■ إيقاف' : '🎤 استماع';
-      el.voice.hidden = !recognizer!.listening && !S.heard.length;
-      if (msg) toast(msg, true);
-    };
-  }
-  if (recognizer.listening) recognizer.stop();
+  const r = ensureRecognizer();
+  if (!r) return;
+  if (r.listening) r.stop();
   else {
-    recognizer.start();
+    void r.start();
     el.voice.hidden = false;
-    el.micBtn.textContent = '■ إيقاف';
+    renderMic(true);
   }
+}
+
+/** Push-to-talk: listen only while the button / Space is held. */
+function holdStart() {
+  const r = ensureRecognizer();
+  if (!r) return;
+  el.voice.hidden = false;
+  stabilizer.reset();
+  void r.holdStart();
+  renderMic(true);
+}
+function holdEnd() {
+  recognizer?.holdEnd();
+  renderMic(false);
+}
+
+function setPtt(on: boolean) {
+  if (recognizer?.listening) recognizer.stop();
+  S.ptt = on;
+  writePref('ptt', on ? '1' : '0');
+  renderMic(false);
+  toast(on ? '✋ اضغط مطولاً على الزر (أو المسافة) وتكلم' : '🎤 الاستماع المستمر');
 }
 
 // ---------- export ----------
@@ -770,7 +926,7 @@ function scrollToRow(row: number) {
     const tr = el.tbody.querySelector<HTMLElement>(`tr[data-row="${row}"]`);
     const controls = document.querySelector<HTMLElement>('.controls');
     if (!tr || !controls) return;
-    const ctrlBottom = controls.getBoundingClientRect().bottom;
+    const ctrlBottom = Math.max(0, controls.getBoundingClientRect().bottom); // phones: controls scroll away
     const r = tr.getBoundingClientRect();
     const visibleMid = ctrlBottom + (window.innerHeight - ctrlBottom) / 2;
     window.scrollTo({ top: window.scrollY + r.top + r.height / 2 - visibleMid, behavior: 'auto' }); // instant: smooth scrolling felt slow
@@ -983,7 +1139,41 @@ el.entry.addEventListener('submit', async (e) => {
 });
 
 el.undoBtn.addEventListener('click', undo);
-el.micBtn.addEventListener('click', toggleMic);
+el.micBtn.addEventListener('click', () => {
+  if (!S.ptt) toggleMic();
+});
+// push-to-talk: hold the mic button (mouse, finger or pen)
+el.micBtn.addEventListener('pointerdown', (e) => {
+  if (!S.ptt) return;
+  e.preventDefault();
+  try {
+    el.micBtn.setPointerCapture(e.pointerId); // keep the hold even if the finger slides off
+  } catch {
+    /* some devices refuse capture */
+  }
+  holdStart();
+});
+for (const ev of ['pointerup', 'pointercancel', 'lostpointercapture'] as const)
+  el.micBtn.addEventListener(ev, () => {
+    if (S.ptt && recognizer?.listening) holdEnd();
+  });
+el.micBtn.addEventListener('contextmenu', (e) => S.ptt && e.preventDefault()); // long-press menu on phones
+// push-to-talk on a keyboard: hold Space (when not typing)
+const typingTarget = (t: EventTarget | null) => t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement;
+window.addEventListener('keydown', (e) => {
+  if (S.ptt && e.code === 'Space' && !e.repeat && !typingTarget(e.target) && !el.confirm.open) {
+    e.preventDefault();
+    holdStart();
+  }
+});
+window.addEventListener('keyup', (e) => {
+  if (S.ptt && e.code === 'Space' && !typingTarget(e.target)) {
+    e.preventDefault();
+    holdEnd();
+  }
+});
+el.pttBtn.addEventListener('click', () => setPtt(!S.ptt));
+el.restartBtn.addEventListener('click', () => restartListening('↻ من جديد'));
 el.pending.addEventListener('click', (e) => {
   const act = (e.target as HTMLElement).closest<HTMLElement>('[data-act]')?.dataset.act;
   if (act === 'ok') commitPending();
@@ -1042,12 +1232,20 @@ window.addEventListener('beforeunload', (e) => {
 if (import.meta.env.DEV) {
   (window as any).__S = S;
   (window as any).__utter = (...alts: string[]) => handleUtterance(alts); // simulate speech
-  (window as any).__interim = (t: string) => liveHighlight(t); // simulate partial speech
+  (window as any).__interim = (t: string) => onInterim(t); // simulate partial speech
+  (window as any).__fakeRecognizer = () => {
+    // stands in for the Web Speech engine in tests: counts restarts
+    const fake = { listening: true, restarts: 0, restart() { fake.restarts++; }, stop() { fake.listening = false; }, start() {}, holdStart() {}, holdEnd() {} };
+    recognizer = fake as unknown as Recognizer;
+    return fake;
+  };
+  (window as any).__final = (text: string, confidence = 0) => handleUtterance([text], confidence);
   (window as any).__collisions = () => S.classes.map((c) => [c.parsed.className, warnCommandCollisions(c)]);
 }
 
 // ---------- boot ----------
 restore().then(() => {
   render();
+  renderMic(false);
   if (active()) el.search.focus();
 });

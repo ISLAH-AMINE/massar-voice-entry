@@ -37,6 +37,17 @@ If a spoken name isn't found, click the right student once — that heard text i
 | فرض الأول / فرض تاني / فرض تالت / الأنشطة | switch exam column |
 | حبس | stop listening |
 | سجل | export |
+| عاود | restart listening — also works at the end of a stuck phrase («… عاود») |
+
+### Noisy places (café, classroom)
+- **✋ Push-to-talk:** tap ✋ once, then hold the mic button (or Space) while you speak.
+  Only what you say while holding is heard. On phones the button is big at the bottom of the screen.
+- No need to wait for a pause: a complete «name/رقم + score» that stays the same for ~1 s is used right away.
+- Background chatter is ignored quietly: long sentences, low-confidence results, unknown words without a score.
+- A doubtful name match asks «هل تقصد …؟» — say واخا or لا.
+- «ونص» / «و ربع» / «لا ربع» said right after an entry corrects it if Chrome cut it off.
+- Stuck on noise? Say «عاود» or tap ↻. The app also restarts by itself after 12 s without a result.
+- The microphone is opened with noise suppression and echo cancellation where the browser allows it.
 
 Speech recognition is done by the browser's online service (Google for Chrome, Microsoft for Edge).
 
